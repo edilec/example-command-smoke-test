@@ -1,13 +1,18 @@
 {
   "name": "example-command-smoke-test",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "description": "Run example commands in clean fixtures and capture expected output.",
   "type": "module",
+  "bin": {
+    "example-command-smoke-test": "./bin/example-command-smoke-test.mjs"
+  },
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test"
+    "lint": "node --check src/index.mjs && node --check bin/example-command-smoke-test.mjs",
+    "test": "node --test test/cli.test.mjs test/report.test.mjs",
+    "check": "npm run lint && npm test"
   },
   "license": "MIT",
   "repository": {
