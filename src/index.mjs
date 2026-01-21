@@ -1,29 +1,15 @@
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
 export const TOOL_ID = 'example-command-smoke-test';
 export const LIMITS = Object.freeze({ bytes: 1_048_576, cases: 12, depth: 4, outputBytes: 4096, timeoutMs: 1000, milliseconds: 10_000 });
 export const RULE_SEVERITY = Object.freeze({
   'input-unreadable': 'error', 'input-invalid': 'error', 'byte-limit': 'error', 'depth-limit': 'error',
   'record-limit': 'error', 'case-invalid': 'error', 'timeout-invalid': 'error', 'expectation-limit': 'error',
   'time-limit': 'error', 'execution-unavailable': 'error', 'output-limit': 'error',
+  'capture-invalid': 'error', 'capture-incomplete': 'error',
   'command-not-allowed': 'error', 'command-timeout': 'error', 'stdout-mismatch': 'error',
   'stderr-mismatch': 'error', 'exit-mismatch': 'error'
 });
-const INCOMPLETE = new Set(['input-unreadable', 'input-invalid', 'byte-limit', 'depth-limit', 'record-limit', 'case-invalid', 'timeout-invalid', 'expectation-limit', 'time-limit', 'execution-unavailable', 'output-limit']);
-const FIXTURE_READ = 'import { readFileSync } from "node:fs"; const data = JSON.parse(readFileSync("fixture.json", "utf8"));';
-const COMMANDS = Object.freeze({
-  'print-ok': { fixture: { value: 'fixture-ok\n' }, code: `${FIXTURE_READ} process.stdout.write(data.value);` },
-  'print-max': { fixture: { count: 4096 }, code: `${FIXTURE_READ} process.stdout.write('x'.repeat(data.count));` },
-  'print-overflow': { fixture: { count: 4097 }, code: `${FIXTURE_READ} process.stdout.write('x'.repeat(data.count));` },
-  'wait-250': { fixture: {}, code: 'setTimeout(() => process.stdout.write("done\\n"), 250);' },
-  'exit-seven': { fixture: {}, code: 'process.exit(7);' },
-  'print-env': { fixture: {}, code: 'process.stdout.write(process.env.SMOKE_SECRET === undefined ? "absent\\n" : "present\\n");' }
-});
-const exec = promisify(execFile);
+const INCOMPLETE = new Set(['input-unreadable', 'input-invalid', 'byte-limit', 'depth-limit', 'record-limit', 'case-invalid', 'timeout-invalid', 'expectation-limit', 'time-limit', 'execution-unavailable', 'output-limit', 'capture-invalid', 'capture-incomplete']);
+const COMMANDS = new Set(['print-ok', 'print-max', 'print-overflow', 'wait-250', 'exit-seven', 'print-env']);
 const object = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 const cmp = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 function tooDeep(input) {
@@ -58,47 +44,39 @@ function validateCase(value) {
   if (Buffer.byteLength(value.expected.stdout) > LIMITS.outputBytes || Buffer.byteLength(value.expected.stderr ?? '') > LIMITS.outputBytes) return 'expectation-limit';
   return null;
 }
-async function execute(command, timeoutMs) {
-  const fixture = await mkdtemp(join(tmpdir(), 'example-smoke-'));
-  try {
-    await writeFile(join(fixture, 'fixture.json'), JSON.stringify(command.fixture), { mode: 0o600 });
-    try {
-      const result = await exec(process.execPath, ['--input-type=module', '--eval', command.code], {
-        cwd: fixture, env: { LANG: 'C', TZ: 'UTC', HOME: fixture, TMPDIR: fixture, PATH: '' },
-        timeout: timeoutMs, maxBuffer: LIMITS.outputBytes, shell: false, windowsHide: true
-      });
-      return { kind: 'done', exitCode: 0, stdout: result.stdout, stderr: result.stderr };
-    } catch (error) {
-      if (error.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return { kind: 'output-limit' };
-      if (error.killed || error.code === 'ETIMEDOUT') return { kind: 'timeout' };
-      if (Number.isInteger(error.code)) return { kind: 'done', exitCode: error.code, stdout: error.stdout ?? '', stderr: error.stderr ?? '' };
-      return { kind: 'unavailable' };
-    }
-  } finally { await rm(fixture, { recursive: true, force: true }); }
-}
-
 export async function runSuite(input, { now = () => performance.now() } = {}) {
   const started = now();
-  if (!object(input) || input.schemaVersion !== '1' || !Array.isArray(input.cases) || input.cases.length === 0 || Object.keys(input).some(key => !['schemaVersion', 'cases'].includes(key))) return incomplete('input-invalid', 'A version 1 suite with nonempty cases is required.');
-  if (tooDeep(input)) return incomplete('depth-limit', 'Suite exceeds nesting depth 4.');
-  if (input.cases.length > LIMITS.cases) return incomplete('record-limit', 'Suite exceeds 12 cases.');
+  if (!object(input) || !object(input.suite) || !object(input.capture)) return incomplete('input-invalid', 'Suite and capture exports are required.');
+  const { suite, capture } = input;
+  if (Buffer.byteLength(JSON.stringify(suite)) > LIMITS.bytes || Buffer.byteLength(JSON.stringify(capture)) > LIMITS.bytes) return incomplete('byte-limit', 'An evidence document exceeds 1048576 bytes.');
+  if (suite.schemaVersion !== '1' || !Array.isArray(suite.cases) || suite.cases.length === 0 || Object.keys(suite).some(key => !['schemaVersion', 'cases'].includes(key))) return incomplete('input-invalid', 'A version 1 suite with nonempty cases is required.');
+  if (tooDeep(suite) || tooDeep(capture)) return incomplete('depth-limit', 'Evidence exceeds nesting depth 4.');
+  if (suite.cases.length > LIMITS.cases || (Array.isArray(capture.results) && capture.results.length > LIMITS.cases)) return incomplete('record-limit', 'Evidence exceeds 12 cases.');
   const findings = [];
-  for (const [i, item] of input.cases.entries()) {
+  for (const [i, item] of suite.cases.entries()) {
     const invalid = validateCase(item);
     if (invalid) finding(findings, invalid, `/cases/${i}`, 'Case or expected output has invalid or unsupported fields.');
-    else if (!Object.hasOwn(COMMANDS, item.command)) finding(findings, 'command-not-allowed', `/cases/${i}/command`, 'Command is not in the fixed allowlist.');
+    else if (!COMMANDS.has(item.command)) finding(findings, 'command-not-allowed', `/cases/${i}/command`, 'Command is not in the fixed allowlist.');
   }
   if (findings.length) return report(findings, 0);
+  if (capture.schemaVersion !== '1' || !Array.isArray(capture.results) || Object.keys(capture).some(key => !['schemaVersion', 'complete', 'results'].includes(key))) return incomplete('capture-invalid', 'Capture shape is invalid.');
+  if (capture.complete !== true) return incomplete('capture-incomplete', 'Capture is not complete.');
+  if (capture.results.length !== suite.cases.length) return incomplete('capture-invalid', 'Capture does not match the case count.');
+  for (const [i, observed] of capture.results.entries()) {
+    if (!object(observed) || observed.command !== suite.cases[i].command || !['exit', 'timeout', 'signal', 'unknown'].includes(observed.termination) || !Number.isInteger(observed.elapsedMs) || observed.elapsedMs < 0 || observed.elapsedMs > LIMITS.milliseconds) return incomplete('capture-invalid', 'Capture result is invalid.');
+    const allowed = observed.termination === 'exit' ? ['command', 'termination', 'elapsedMs', 'exitCode', 'stdout', 'stderr'] : ['command', 'termination', 'elapsedMs'];
+    if (Object.keys(observed).some(key => !allowed.includes(key))) return incomplete('capture-invalid', 'Capture result has unsupported fields.');
+    if (observed.termination === 'exit' && (!Number.isInteger(observed.exitCode) || observed.exitCode < 0 || observed.exitCode > 255 || typeof observed.stdout !== 'string' || typeof observed.stderr !== 'string')) return incomplete('capture-invalid', 'Captured exit result is invalid.');
+    if (observed.termination !== 'exit' && ['exitCode', 'stdout', 'stderr'].some(key => Object.hasOwn(observed, key))) return incomplete('capture-invalid', 'Non-exit capture has unsupported output.');
+  }
   let checked = 0;
-  for (const [i, item] of input.cases.entries()) {
+  for (const [i, item] of suite.cases.entries()) {
     if (now() - started > LIMITS.milliseconds) return incomplete('time-limit', 'Suite evaluation exceeded 10000 milliseconds.');
-    let observed;
-    try { observed = await execute(COMMANDS[item.command], item.timeoutMs); }
-    catch { return incomplete('execution-unavailable', 'Disposable fixture or child execution failed.'); }
+    const observed = capture.results[i];
     checked++;
-    if (observed.kind === 'timeout') finding(findings, 'command-timeout', `/cases/${i}/timeoutMs`, 'Allowlisted command exceeded its timeout.', `timeoutMs=${item.timeoutMs}`);
-    else if (observed.kind === 'output-limit') finding(findings, 'output-limit', `/cases/${i}`, 'Child output exceeded 4096 bytes.');
-    else if (observed.kind === 'unavailable') finding(findings, 'execution-unavailable', `/cases/${i}`, 'Child execution could not be evaluated.');
+    if (observed.termination === 'timeout' || observed.termination === 'exit' && observed.elapsedMs > item.timeoutMs) finding(findings, 'command-timeout', `/cases/${i}/timeoutMs`, 'Captured command reached its timeout.', `timeoutMs=${item.timeoutMs};elapsedMs=${observed.elapsedMs}`);
+    else if (observed.termination !== 'exit') finding(findings, 'execution-unavailable', `/cases/${i}`, 'Captured command did not produce an exit result.');
+    else if (Buffer.byteLength(observed.stdout) > LIMITS.outputBytes || Buffer.byteLength(observed.stderr) > LIMITS.outputBytes) finding(findings, 'output-limit', `/cases/${i}`, 'Captured output exceeds 4096 bytes.');
     else {
       if (observed.exitCode !== item.expected.exitCode) finding(findings, 'exit-mismatch', `/cases/${i}/expected/exitCode`, 'Child exit code does not match expectation.');
       if (observed.stdout !== item.expected.stdout) finding(findings, 'stdout-mismatch', `/cases/${i}/expected/stdout`, 'Child stdout does not match expectation.');

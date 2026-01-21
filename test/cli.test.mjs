@@ -8,64 +8,64 @@ import { LIMITS } from '../src/index.mjs';
 
 const cli = join(import.meta.dirname, '../bin/example-command-smoke-test.mjs');
 const suite = { schemaVersion: '1', cases: [{ command: 'print-ok', timeoutMs: 1000, expected: { exitCode: 0, stdout: 'fixture-ok\n' } }] };
-const run = (root, ...extra) => spawnSync(process.execPath, [cli, '--root', root, '--suite', 'suite.json', ...extra], { encoding: 'utf8', env: process.env });
+const capture = { schemaVersion: '1', complete: true, results: [{ command: 'print-ok', termination: 'exit', exitCode: 0, stdout: 'fixture-ok\n', stderr: '', elapsedMs: 10 }] };
+const run = (root, ...extra) => spawnSync(process.execPath, [cli, '--root', root, '--suite', 'suite.json', '--capture', 'capture.json', ...extra], { encoding: 'utf8', env: process.env });
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), 'example-suite-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   await writeFile(join(root, 'suite.json'), JSON.stringify(suite));
+  await writeFile(join(root, 'capture.json'), JSON.stringify(capture));
   return root;
 }
-
-test('CLI runs allowlisted suite and emits deterministic JSON only', async t => {
+test('CLI compares exported evidence deterministically without executing a command', async t => {
   const root = await fixture(t); const a = run(root), b = run(root);
   assert.equal(a.status, 0); assert.equal(a.stdout, b.stdout); assert.equal(a.stderr, '');
   assert.equal(JSON.parse(a.stdout).status, 'pass');
 });
-
-test('CLI refuses unknown command without running earlier allowlisted cases', async t => {
+test('CLI unknown command is refused before comparison', async t => {
   const root = await fixture(t); const input = structuredClone(suite);
   input.cases.push({ command: 'arbitrary-shell', timeoutMs: 50, expected: { exitCode: 0, stdout: '' } });
   await writeFile(join(root, 'suite.json'), JSON.stringify(input));
-  const result = run(root); const report = JSON.parse(result.stdout);
+  const result = run(root), report = JSON.parse(result.stdout);
   assert.equal(result.status, 1); assert.equal(report.summary.checked, 0);
   assert.deepEqual(report.findings.map(f => f.ruleId), ['command-not-allowed']);
   assert.ok(!result.stdout.includes('arbitrary-shell'));
 });
-
-test('CLI timeout exits 1 and carries a bounded numeric timeout observation', async t => {
-  const root = await fixture(t);
-  await writeFile(join(root, 'suite.json'), JSON.stringify({ schemaVersion: '1', cases: [{ command: 'wait-250', timeoutMs: 30, expected: { exitCode: 0, stdout: '' } }] }));
+test('CLI captured timeout fails with explicit bounded observation', async t => {
+  const root = await fixture(t), input = structuredClone(suite), observed = structuredClone(capture);
+  input.cases[0].timeoutMs = 30; observed.results[0] = { command: 'print-ok', termination: 'timeout', elapsedMs: 30 };
+  await writeFile(join(root, 'suite.json'), JSON.stringify(input));
+  await writeFile(join(root, 'capture.json'), JSON.stringify(observed));
   const result = run(root); assert.equal(result.status, 1);
   const report = JSON.parse(result.stdout);
-  assert.equal(report.findings[0].ruleId, 'command-timeout'); assert.equal(report.findings[0].evidence, 'timeoutMs=30');
+  assert.equal(report.findings[0].ruleId, 'command-timeout'); assert.equal(report.findings[0].evidence, 'timeoutMs=30;elapsedMs=30');
 });
-
-test('Markdown blocks beside suite are never parsed or executed', async t => {
+test('arbitrary Markdown beside exports is never parsed or executed', async t => {
   const root = await fixture(t), marker = join(root, 'should-not-exist');
-  await writeFile(join(root, 'README.md'), `# Examples\n\n\`\`\`sh\ntouch ${marker}\n\`\`\`\n`);
-  const result = run(root);
-  assert.equal(result.status, 0); await assert.rejects(stat(marker));
+  await writeFile(join(root, 'README.md'), `# Example\n\n\`\`\`sh\ntouch ${marker}\n\`\`\`\n`);
+  assert.equal(run(root).status, 0); await assert.rejects(stat(marker));
 });
-
-test('CLI input byte bound accepts exact N and refuses N+1', async t => {
-  const root = await fixture(t), body = JSON.stringify(suite);
-  await writeFile(join(root, 'suite.json'), body + ' '.repeat(LIMITS.bytes - Buffer.byteLength(body)));
-  assert.equal(run(root).status, 0);
-  await writeFile(join(root, 'suite.json'), body + ' '.repeat(LIMITS.bytes + 1 - Buffer.byteLength(body)));
-  const result = run(root); assert.equal(result.status, 2);
-  assert.equal(JSON.parse(result.stdout).findings[0].ruleId, 'byte-limit');
-});
-
-test('CLI malformed input reports incomplete without leaking contents; bad config has empty stdout', async t => {
+test('each input byte bound accepts N and rejects N+1', async t => {
   const root = await fixture(t);
-  await writeFile(join(root, 'suite.json'), Buffer.from([0xff]));
+  for (const name of ['suite.json', 'capture.json']) {
+    const body = await readFile(join(root, name), 'utf8');
+    await writeFile(join(root, name), body + ' '.repeat(LIMITS.bytes - Buffer.byteLength(body)));
+    assert.equal(run(root).status, 0, name);
+    await writeFile(join(root, name), body + ' '.repeat(LIMITS.bytes + 1 - Buffer.byteLength(body)));
+    const result = run(root); assert.equal(result.status, 2);
+    assert.equal(JSON.parse(result.stdout).findings[0].ruleId, 'byte-limit');
+    await writeFile(join(root, name), body);
+  }
+});
+test('malformed evidence is incomplete without leaking values; bad options have empty stdout', async t => {
+  const root = await fixture(t);
+  await writeFile(join(root, 'capture.json'), Buffer.from([0xff]));
   const badUtf8 = run(root); assert.equal(badUtf8.status, 2); assert.equal(JSON.parse(badUtf8.stdout).findings[0].ruleId, 'input-unreadable');
-  await writeFile(join(root, 'suite.json'), '"secret-marker" not-json');
-  const badJson = run(root); assert.equal(badJson.status, 2); assert.ok(!badJson.stdout.includes('secret-marker'));
+  await writeFile(join(root, 'capture.json'), '"private-marker" not-json');
+  const badJson = run(root); assert.equal(badJson.status, 2); assert.ok(!badJson.stdout.includes('private-marker'));
   const badConfig = run(root, '--unknown'); assert.equal(badConfig.status, 2); assert.equal(badConfig.stdout, '');
 });
-
-test('CLI confines input realpaths and output destinations, allowing ordinary output', async t => {
+test('CLI confines both read realpaths and output destinations', async t => {
   const root = await fixture(t), outside = await mkdtemp(join(tmpdir(), 'example-outside-'));
   t.after(() => rm(outside, { recursive: true, force: true }));
   const allowed = run(root, '--out', 'report.json'); assert.equal(allowed.status, 0);
@@ -73,24 +73,23 @@ test('CLI confines input realpaths and output destinations, allowing ordinary ou
   await writeFile(join(outside, 'sentinel.json'), 'unchanged');
   await symlink(join(outside, 'sentinel.json'), join(root, 'linked.json'));
   const linked = run(root, '--out', 'linked.json'); assert.equal(linked.status, 2); assert.equal(linked.stdout, '');
-  assert.equal(await readFile(join(outside, 'sentinel.json'), 'utf8'), 'unchanged');
   await symlink(outside, join(root, 'escape'));
   const parent = run(root, '--out', 'escape/report.json'); assert.equal(parent.status, 2); assert.equal(parent.stdout, '');
   await assert.rejects(stat(join(outside, 'report.json')));
   await symlink(join(outside, 'sentinel.json'), join(root, 'outside.json'));
-  const inputEscape = spawnSync(process.execPath, [cli, '--root', root, '--suite', 'outside.json'], { encoding: 'utf8', env: process.env });
+  const inputEscape = spawnSync(process.execPath, [cli, '--root', root, '--suite', 'suite.json', '--capture', 'outside.json'], { encoding: 'utf8' });
   assert.equal(inputEscape.status, 2); assert.equal(JSON.parse(inputEscape.stdout).status, 'incomplete');
+  assert.equal(await readFile(join(outside, 'sentinel.json'), 'utf8'), 'unchanged');
 });
-
-test('CLI refuses hard-link output and missing-input aliases through symlinked parent', async t => {
+test('CLI refuses hard-link output and missing-input aliases via symlinked parent', async t => {
   const root = await fixture(t);
-  await link(join(root, 'suite.json'), join(root, 'hard.json'));
-  const before = await readFile(join(root, 'suite.json'));
+  await link(join(root, 'capture.json'), join(root, 'hard.json'));
+  const before = await readFile(join(root, 'capture.json'));
   const hard = run(root, '--out', 'hard.json'); assert.equal(hard.status, 2); assert.equal(hard.stdout, '');
-  assert.deepEqual(await readFile(join(root, 'suite.json')), before);
+  assert.deepEqual(await readFile(join(root, 'capture.json')), before);
   await symlink(root, join(root, 'alias'));
   for (const dest of ['missing.json', 'alias/missing.json']) {
-    const result = spawnSync(process.execPath, [cli, '--root', root, '--suite', 'missing.json', '--out', dest], { encoding: 'utf8', env: process.env });
+    const result = spawnSync(process.execPath, [cli, '--root', root, '--suite', 'suite.json', '--capture', 'missing.json', '--out', dest], { encoding: 'utf8' });
     assert.equal(result.status, 2); assert.equal(result.stdout, '');
     await assert.rejects(stat(join(root, 'missing.json')));
   }

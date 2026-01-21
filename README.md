@@ -1,57 +1,54 @@
 # Example Command Smoke Test
 
-Run a fixed allowlist of synthetic example commands in disposable local fixtures and compare exit codes and bounded stdout/stderr. The input selects command IDs; it cannot provide a shell command, script, arguments, environment variables, fixture content, or a directory for child execution. Requires Node.js 22 or newer; no package dependencies or network calls.
+An offline, read-only reporter for **exported results of a fixed set of synthetic example commands**. It compares captured exit codes, stdout/stderr, elapsed time, and explicit timeout outcomes with expected policies. It does not launch commands, write fixtures, read Markdown, or touch a live system. A trusted external process must produce a complete local capture; the reporter cannot prove the capture was genuine. Node.js 22+; zero dependencies.
 
 ## Run
 
 ```sh
-node bin/example-command-smoke-test.mjs --root . --suite examples/passing.json
-node bin/example-command-smoke-test.mjs --root . --suite examples/failing.json
-node bin/example-command-smoke-test.mjs --root . --suite examples/timeout.json
+node bin/example-command-smoke-test.mjs --root examples --suite passing.json --capture passing-capture.json
+node bin/example-command-smoke-test.mjs --root examples --suite failing.json --capture failing-capture.json
+node bin/example-command-smoke-test.mjs --root examples --suite timeout.json --capture timeout-capture.json
 npm run check
 ```
 
-The examples exit `0` (match), `1` (unknown command refused before any execution), and `1` (timeout with `timeoutMs=30` evidence). Add `--human` for a short stderr summary. `--out report.json` additionally writes the same JSON report within `--root`; stdout remains JSON. The output parent must already exist. Input and output names are relative to root; input realpaths must remain inside it. Output symlinks, output-parent escapes, and path or hard-link aliases of the suite input are refused with exit `2` and empty stdout. An ordinary existing output file may be replaced atomically. No report file is written without `--out`.
+These exit 0, 1 (unknown command refused), and 1 (captured timeout). `--human` adds a short stderr summary. `--out report.json` also writes the JSON stdout report within the evidence root. Invalid options or refused output destinations exit 2 with empty stdout; ordinary incomplete evidence emits JSON and exits 2.
 
-## Suite format and allowlist
+## Evidence contract
+
+`--suite` and `--capture` are strict UTF-8 JSON files relative to `--root`. Real paths must stay within the root. The suite format is:
 
 ```json
-{
-  "schemaVersion": "1",
-  "cases": [
-    { "command": "print-ok", "timeoutMs": 1000, "expected": { "exitCode": 0, "stdout": "fixture-ok\n" } }
-  ]
-}
+{"schemaVersion":"1","cases":[{"command":"print-ok","timeoutMs":1000,"expected":{"exitCode":0,"stdout":"fixture-ok\n"}}]}
 ```
 
-Each case has only `command`, `timeoutMs`, and `expected`, plus an optional opaque `id` that is never reported. `expected` contains `exitCode` (integer 0–255), `stdout` (exact string), and optional `stderr` (defaults to empty). Extra suite, case, and expected fields are invalid. Every case is validated before any command runs. An unknown command causes an evaluated `fail` with `checked: 0` and no child execution. Arbitrary Markdown files and fenced examples are not read; no Markdown code block can become a command.
+Each case can also have an opaque `id`; expected `stderr` defaults to empty. Commands are IDs, not shell strings. The fixed allowlist is `print-ok`, `print-max`, `print-overflow`, `wait-250`, `exit-seven`, and `print-env`. These names identify synthetic fixture scenarios only; this tool implements none of their behavior. Unknown IDs are refused before any comparison and cannot be added through input.
 
-| Command ID | Synthetic behavior |
-| --- | --- |
-| `print-ok` | Reads the generated fixture and prints `fixture-ok` plus newline. |
-| `print-max` | Prints exactly 4,096 `x` bytes. |
-| `print-overflow` | Prints 4,097 `x` bytes to exercise the output bound. |
-| `wait-250` | Waits 250 ms, then prints `done` plus newline. |
-| `exit-seven` | Exits with code 7 and no output. |
-| `print-env` | Prints only whether the ambient `SMOKE_SECRET` variable is absent; the child environment omits it. |
+The capture format is:
 
-These are fixed source-code snippets, not templates filled from input. Every case gets a newly generated temporary directory with static fixture content; it is removed after the child exits. Child processes use the current Node executable directly, never a shell, with a restricted environment containing only `LANG`, `TZ`, `HOME`, `TMPDIR`, and an empty `PATH`. They do not inherit `NODE_OPTIONS` or arbitrary host variables. This is a narrow synthetic smoke test, **not** an operating-system sandbox for third-party code; no user-supplied code is executed or tested against real systems.
+```json
+{"schemaVersion":"1","complete":true,"results":[{"command":"print-ok","termination":"exit","exitCode":0,"stdout":"fixture-ok\n","stderr":"","elapsedMs":10}]}
+```
+
+Results match suite cases by ordinal and command ID. `termination` is one of `exit`, `timeout`, `signal`, or `unknown`. Only `exit` carries exit code/stdout/stderr. A captured `timeout` or an exited result whose elapsed time exceeds the configured timeout is an evaluated failure with bounded numeric evidence; a signal or unknown termination is incomplete, **not** a timeout. `complete:false`, missing results, identity mismatch, and invalid shapes never pass. Arbitrary Markdown code fences beside the exports are ignored.
 
 ## Rules and exits
 
-| Rule | Severity | Meaning |
+| Exit | Rules | Meaning |
 | --- | --- | --- |
-| `command-not-allowed` | error, fail | An unknown command ID was refused before execution. |
-| `command-timeout` | error, fail | A fixed command exceeded its declared timeout. |
-| `stdout-mismatch`, `stderr-mismatch`, `exit-mismatch` | error, fail | Observed output or exit code differs from the declared expectation. |
-| `input-invalid`, `input-unreadable`, `case-invalid`, `timeout-invalid` | error, incomplete | Required or supported suite evidence is absent. |
-| `byte-limit`, `depth-limit`, `record-limit`, `expectation-limit`, `output-limit`, `time-limit` | error, incomplete | A declared safety bound was exceeded. |
-| `execution-unavailable` | error, incomplete | A disposable fixture or child could not be evaluated. |
+| 0 | none | All allowlisted captured exits exactly match expectations. |
+| 1 | `command-not-allowed` | Unknown command ID refused before comparison. |
+| 1 | `command-timeout` | Capture explicitly reports a timeout. |
+| 1 | `exit-mismatch`, `stdout-mismatch`, `stderr-mismatch` | Captured exit differs from expectation. |
+| 2 | `capture-invalid`, `capture-incomplete`, `execution-unavailable` | Missing, partial, inconsistent or non-exit observation. |
+| 2 | `input-unreadable`, `input-invalid`, `case-invalid`, `timeout-invalid` | Unusable evidence or policy. |
+| 2 | `byte-limit`, `depth-limit`, `record-limit`, `expectation-limit`, `output-limit`, `time-limit` | A declared bound was exceeded. |
 
-Exit `0` means `pass`, exit `1` an evaluated `fail`, and exit `2` `incomplete` or invalid invocation. Invalid options/configuration and output refusal leave stdout empty with a generic stderr diagnostic. Unreadable, undecodable, or unparseable input yields an `incomplete` JSON report. The JSON envelope follows catalog v1. `@suite` in finding locations is a fixed logical role for the exact suite file named at invocation, not a filesystem path; `/cases/N` uses zero-based ordinals. No raw child output, expected output, case ID, or untrusted command string is copied into findings. Timeout evidence contains only the configured integer limit. Findings sort by `(location.file, location.pointer, ruleId)` in JavaScript code-unit order; identical inputs produce identical stdout.
+Reports use fixed messages and source-ordinal pointers such as `@suite:/cases/0`; no raw command ID, output, expected value, case ID, or filesystem path is emitted. Findings sort by JavaScript code-unit order. Incomplete takes precedence over fail.
 
-## Limits and non-goals
+## Bounds and non-goals
 
-At most 1,048,576 suite bytes, 12 cases, JSON depth 4 (root depth 0), 4,096 bytes per expected or actual stdout/stderr stream, timeout 1–1,000 ms per case, and 10,000 ms total evaluation. Every upper bound accepts exactly N and refuses N+1. A timeout is a failed observation; oversized output or invalid evidence is incomplete, never a pass. The tool does not execute README commands, arbitrary shell blocks, package scripts, external providers, or live production workflows. It does not verify that real-world documentation examples work; only the six synthetic allowlisted behaviors are in scope.
+Each exported JSON file is limited to 1,048,576 bytes; at most 12 cases/results; JSON depth at most 4 (root 0); stdout/stderr at most 4,096 bytes per stream; configured timeout 1–1,000 ms; captured elapsed time 0–10,000 ms; evaluation time at most 10,000 ms. Exact N is accepted, N+1 refused. `--out` rejects symlink destinations, symlinked parent escapes, hard links or path aliases to either input (including named missing inputs); existing normal in-root report files may be atomically replaced.
+
+This is not a command runner, sandbox, shell validator, documentation crawler, or proof that real-world examples work. It does not execute README blocks, package scripts, child processes, or network requests. Only exported local synthetic evidence is evaluated.
 
 MIT licensed; see [LICENSE](./LICENSE).
