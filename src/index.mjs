@@ -48,7 +48,12 @@ export async function runSuite(input, { now = () => performance.now() } = {}) {
   const started = now();
   if (!object(input) || !object(input.suite) || !object(input.capture)) return incomplete('input-invalid', 'Suite and capture exports are required.');
   const { suite, capture } = input;
-  if (Buffer.byteLength(JSON.stringify(suite)) > LIMITS.bytes || Buffer.byteLength(JSON.stringify(capture)) > LIMITS.bytes) return incomplete('byte-limit', 'An evidence document exceeds 1048576 bytes.');
+  let suiteBytes, captureBytes;
+  try { suiteBytes = Buffer.byteLength(JSON.stringify(suite)); }
+  catch { return incomplete('input-invalid', 'Suite cannot be represented as JSON evidence.'); }
+  try { captureBytes = Buffer.byteLength(JSON.stringify(capture)); }
+  catch { return incomplete('capture-invalid', 'Capture cannot be represented as JSON evidence.'); }
+  if (suiteBytes > LIMITS.bytes || captureBytes > LIMITS.bytes) return incomplete('byte-limit', 'An evidence document exceeds 1048576 bytes.');
   if (suite.schemaVersion !== '1' || !Array.isArray(suite.cases) || suite.cases.length === 0 || Object.keys(suite).some(key => !['schemaVersion', 'cases'].includes(key))) return incomplete('input-invalid', 'A version 1 suite with nonempty cases is required.');
   if (tooDeep(suite) || tooDeep(capture)) return incomplete('depth-limit', 'Evidence exceeds nesting depth 4.');
   if (suite.cases.length > LIMITS.cases || (Array.isArray(capture.results) && capture.results.length > LIMITS.cases)) return incomplete('record-limit', 'Evidence exceeds 12 cases.');

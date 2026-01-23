@@ -97,3 +97,16 @@ test('case 10 sorts before case 2 by code unit', async () => {
   const result = await runSuite(input);
   assert.deepEqual(result.findings.map(f => f.location.pointer), ['/cases/10/expected/stdout', '/cases/2/expected/stdout']);
 });
+
+test('non-JSON direct library values return incomplete instead of throwing', async () => {
+  const suite = good(); suite.suite.extra = 1n;
+  const invalidSuite = await runSuite(suite);
+  assert.equal(invalidSuite.status, 'incomplete');
+  assert.deepEqual(rules(invalidSuite), ['input-invalid']);
+  const capture = good(); capture.capture.extra = 1n;
+  const invalidCapture = await runSuite(capture);
+  assert.equal(invalidCapture.status, 'incomplete');
+  assert.deepEqual(rules(invalidCapture), ['capture-invalid']);
+  const cyclic = good(); cyclic.capture.results[0].loop = cyclic.capture;
+  assert.deepEqual(rules(await runSuite(cyclic)), ['capture-invalid']);
+});
