@@ -1,0 +1,1 @@
+{"schemaVersion":"1","complete":true,"results":[{"command":"print-ok","termination":"exit","exitCode":0,"stdout":"fixture-ok\n","stderr":"","elapsedMs":10}]}

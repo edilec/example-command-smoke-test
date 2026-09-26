@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "1",
+  "cases": [
+    { "command": "print-ok", "timeoutMs": 1000, "expected": { "exitCode": 0, "stdout": "fixture-ok\n" } }
+  ]
+}

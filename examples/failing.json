@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "1",
+  "cases": [
+    { "command": "unknown-command", "timeoutMs": 1000, "expected": { "exitCode": 0, "stdout": "" } }
+  ]
+}
